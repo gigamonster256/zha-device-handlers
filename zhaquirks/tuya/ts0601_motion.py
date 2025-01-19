@@ -1,451 +1,700 @@
 """BlitzWolf IS-3/Tuya motion rechargeable occupancy sensor."""
 
+import asyncio
 import math
-from typing import Optional, Union
+from typing import Any
 
-from zigpy.profiles import zgp, zha
-from zigpy.quirks import CustomDevice
+from zigpy.quirks.v2 import EntityPlatform, EntityType
+from zigpy.quirks.v2.homeassistant import UnitOfLength, UnitOfTime
+from zigpy.quirks.v2.homeassistant.binary_sensor import BinarySensorDeviceClass
+from zigpy.quirks.v2.homeassistant.sensor import SensorDeviceClass, SensorStateClass
 import zigpy.types as t
-from zigpy.zcl import foundation
-from zigpy.zcl.clusters.general import (
-    AnalogInput,
-    Basic,
-    GreenPowerProxy,
-    Groups,
-    Identify,
-    Ota,
-    Scenes,
-    Time,
-)
-from zigpy.zcl.clusters.measurement import (
-    IlluminanceMeasurement,
-    OccupancySensing,
-    RelativeHumidity,
-    TemperatureMeasurement,
-)
+from zigpy.zcl.clusters.measurement import IlluminanceMeasurement, OccupancySensing
 from zigpy.zcl.clusters.security import IasZone
 
-from zhaquirks import Bus, LocalDataCluster, MotionOnEvent
-from zhaquirks.const import (
-    DEVICE_TYPE,
-    ENDPOINTS,
-    INPUT_CLUSTERS,
-    MODELS_INFO,
-    MOTION_EVENT,
-    OUTPUT_CLUSTERS,
-    PROFILE_ID,
-)
-from zhaquirks.tuya import (
-    DPToAttributeMapping,
-    TuyaLocalCluster,
-    TuyaManufCluster,
-    TuyaNewManufCluster,
-)
-from zhaquirks.tuya.mcu import TuyaMCUCluster
+from zhaquirks.tuya import TuyaLocalCluster
+from zhaquirks.tuya.builder import TuyaQuirkBuilder
 
-ZONE_TYPE = 0x0001
+
+class TuyaIlluminanceCluster(IlluminanceMeasurement, TuyaLocalCluster):
+    """Tuya Illuminance cluster."""
 
 
 class TuyaOccupancySensing(OccupancySensing, TuyaLocalCluster):
     """Tuya local OccupancySensing cluster."""
 
 
-class TuyaAnalogInput(AnalogInput, TuyaLocalCluster):
-    """Tuya local AnalogInput cluster."""
+class TuyaMotionWithReset(IasZone, TuyaLocalCluster):
+    """Tuya local IAS motion cluster with reset."""
 
-
-class TuyaIlluminanceMeasurement(IlluminanceMeasurement, TuyaLocalCluster):
-    """Tuya local IlluminanceMeasurement cluster."""
-
-
-class TuyaTemperatureMeasurement(TemperatureMeasurement, TuyaLocalCluster):
-    """Tuya local TemperatureMeasurement cluster."""
-
-
-class TuyaRelativeHumidity(RelativeHumidity, TuyaLocalCluster):
-    """Tuya local RelativeHumidity cluster."""
-
-
-class NeoBatteryLevel(t.enum8):
-    """NEO battery level enum."""
-
-    BATTERY_FULL = 0x00
-    BATTERY_HIGH = 0x01
-    BATTERY_MEDIUM = 0x02
-    BATTERY_LOW = 0x03
-    USB_POWER = 0x04
-
-
-class NeoMotionManufCluster(TuyaNewManufCluster):
-    """Neo manufacturer cluster."""
-
-    attributes = TuyaNewManufCluster.attributes.copy()
-    attributes.update(
-        {
-            0xEF0D: ("dp_113", t.enum8, True),  # random attribute ID
-        }
-    )
-
-    dp_to_attribute: dict[int, DPToAttributeMapping] = {
-        101: DPToAttributeMapping(
-            TuyaOccupancySensing.ep_attribute,
-            "occupancy",
-        ),
-        104: DPToAttributeMapping(
-            TuyaTemperatureMeasurement.ep_attribute,
-            "measured_value",
-            lambda x: x * 10,
-        ),
-        105: DPToAttributeMapping(
-            TuyaRelativeHumidity.ep_attribute,
-            "measured_value",
-            lambda x: x * 100,
-        ),
-        113: DPToAttributeMapping(
-            TuyaNewManufCluster.ep_attribute,
-            "dp_113",
-        ),
+    _CONSTANT_ATTRIBUTES = {
+        IasZone.AttributeDefs.zone_type.id: IasZone.ZoneType.Motion_Sensor
     }
-
-    data_point_handlers = {
-        101: "_dp_2_attr_update",
-        104: "_dp_2_attr_update",
-        105: "_dp_2_attr_update",
-        113: "_dp_2_attr_update",
-    }
-
-
-class MmwRadarManufCluster(TuyaMCUCluster):
-    """Neo manufacturer cluster."""
-
-    # # Possible DPs and values
-    # presence_state: presence
-    # target distance: 1.61m
-    # illuminance: 250lux
-    # sensitivity: 9
-    # minimum_detection_distance: 0.00m
-    # maximum_detection_distance: 4.05m
-    # dp_detection_delay: 0.1
-    # dp_fading_time: 5.0
-    # ¿illuminance?: 255lux
-    # presence_brightness: no control
-    # no_one_brightness: no control
-    # current_brightness: off
-
-    attributes = TuyaMCUCluster.attributes.copy()
-    attributes.update(
-        {
-            # random attribute IDs
-            0xEF02: ("dp_2", t.uint32_t, True),
-            0xEF03: ("dp_3", t.uint32_t, True),
-            0xEF04: ("dp_4", t.uint32_t, True),
-            0xEF06: ("dp_6", t.enum8, True),
-            0xEF65: ("dp_101", t.uint32_t, True),
-            0xEF66: ("dp_102", t.uint32_t, True),
-            0xEF67: ("dp_103", t.CharacterString, True),
-            0xEF69: ("dp_105", t.enum8, True),
-            0xEF6A: ("dp_106", t.enum8, True),
-            0xEF6B: ("dp_107", t.enum8, True),
-            0xEF6C: ("dp_108", t.uint32_t, True),
-        }
-    )
-
-    dp_to_attribute: dict[int, DPToAttributeMapping] = {
-        1: DPToAttributeMapping(
-            TuyaOccupancySensing.ep_attribute,
-            "occupancy",
-        ),
-        2: DPToAttributeMapping(
-            TuyaMCUCluster.ep_attribute,
-            "dp_2",
-        ),
-        3: DPToAttributeMapping(
-            TuyaMCUCluster.ep_attribute,
-            "dp_3",
-        ),
-        4: DPToAttributeMapping(
-            TuyaMCUCluster.ep_attribute,
-            "dp_4",
-        ),
-        6: DPToAttributeMapping(
-            TuyaMCUCluster.ep_attribute,
-            "dp_6",
-        ),
-        9: DPToAttributeMapping(
-            TuyaAnalogInput.ep_attribute,
-            "present_value",
-            lambda x: x / 100,
-        ),
-        101: DPToAttributeMapping(
-            TuyaMCUCluster.ep_attribute,
-            "dp_101",
-        ),
-        102: DPToAttributeMapping(
-            TuyaMCUCluster.ep_attribute,
-            "dp_102",
-        ),
-        103: DPToAttributeMapping(
-            TuyaMCUCluster.ep_attribute,
-            "dp_103",
-        ),
-        104: DPToAttributeMapping(
-            TuyaIlluminanceMeasurement.ep_attribute,
-            "measured_value",
-            lambda x: 10000 * math.log10(x) + 1 if x != 0 else 0,
-        ),
-        105: DPToAttributeMapping(
-            TuyaMCUCluster.ep_attribute,
-            "dp_105",
-        ),
-        106: DPToAttributeMapping(
-            TuyaMCUCluster.ep_attribute,
-            "dp_106",
-        ),
-        107: DPToAttributeMapping(
-            TuyaMCUCluster.ep_attribute,
-            "dp_107",
-        ),
-        108: DPToAttributeMapping(
-            TuyaMCUCluster.ep_attribute,
-            "dp_108",
-        ),
-    }
-
-    data_point_handlers = {
-        1: "_dp_2_attr_update",
-        2: "_dp_2_attr_update",
-        3: "_dp_2_attr_update",
-        4: "_dp_2_attr_update",
-        6: "_dp_2_attr_update",
-        9: "_dp_2_attr_update",
-        101: "_dp_2_attr_update",
-        102: "_dp_2_attr_update",
-        103: "_dp_2_attr_update",
-        104: "_dp_2_attr_update",
-        105: "_dp_2_attr_update",
-        106: "_dp_2_attr_update",
-        107: "_dp_2_attr_update",
-        108: "_dp_2_attr_update",
-    }
-
-
-class MotionCluster(LocalDataCluster, MotionOnEvent):
-    """Tuya Motion Sensor."""
-
-    _CONSTANT_ATTRIBUTES = {ZONE_TYPE: IasZone.ZoneType.Motion_Sensor}
-    reset_s = 15
-
-
-class TuyaManufacturerClusterMotion(TuyaManufCluster):
-    """Manufacturer Specific Cluster of the Motion device."""
-
-    def handle_cluster_request(
-        self,
-        hdr: foundation.ZCLHeader,
-        args: tuple[TuyaManufCluster.Command],
-        *,
-        dst_addressing: Optional[
-            Union[t.Addressing.Group, t.Addressing.IEEE, t.Addressing.NWK]
-        ] = None,
-    ) -> None:
-        """Handle cluster request."""
-        tuya_cmd = args[0]
-        self.debug("handle_cluster_request--> hdr: %s, args: %s", hdr, args)
-        if hdr.command_id == 0x0001 and tuya_cmd.command_id == 1027:
-            self.endpoint.device.motion_bus.listener_event(MOTION_EVENT)
-
-
-class TuyaMotion(CustomDevice):
-    """BW-IS3 occupancy sensor."""
+    reset_s: int = 15
 
     def __init__(self, *args, **kwargs):
-        """Init device."""
-        self.motion_bus = Bus()
+        """Init."""
         super().__init__(*args, **kwargs)
+        self._loop = asyncio.get_running_loop()
+        self._timer_handle = None
 
-    signature = {
-        #  endpoint=1 profile=260 device_type=0 device_version=0 input_clusters=[0, 3]
-        #  output_clusters=[3, 25]>
-        MODELS_INFO: [("_TYST11_i5j6ifxj", "5j6ifxj"), ("_TYST11_7hfcudw5", "hfcudw5")],
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: zha.DeviceType.ON_OFF_SWITCH,
-                INPUT_CLUSTERS: [Basic.cluster_id, Identify.cluster_id],
-                OUTPUT_CLUSTERS: [Identify.cluster_id, Ota.cluster_id],
-            }
-        },
-    }
+    def _turn_off(self) -> None:
+        """Reset IAS zone status."""
+        self._timer_handle = None
+        self.debug("%s - Resetting Tuya motion sensor", self.endpoint.device.ieee)
+        self._update_attribute(IasZone.AttributeDefs.zone_status.id, 0)
 
-    replacement = {
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: zha.DeviceType.OCCUPANCY_SENSOR,
-                INPUT_CLUSTERS: [
-                    Basic.cluster_id,
-                    Identify.cluster_id,
-                    MotionCluster,
-                    TuyaManufacturerClusterMotion,
-                ],
-                OUTPUT_CLUSTERS: [Identify.cluster_id, Ota.cluster_id],
-            }
-        }
-    }
+    def _update_attribute(self, attrid: int | t.uint16_t, value: Any) -> None:
+        """Catch zone status updates and potentially schedule reset."""
+        if (
+            attrid == IasZone.AttributeDefs.zone_status.id
+            and value == IasZone.ZoneStatus.Alarm_1
+        ):
+            self.debug("%s - Received Tuya motion event", self.endpoint.device.ieee)
+            if self._timer_handle:
+                self._timer_handle.cancel()
+            self._timer_handle = self._loop.call_later(self.reset_s, self._turn_off)
+
+        super()._update_attribute(attrid, value)
 
 
-class NeoMotion(CustomDevice):
-    """NAS-PD07 occupancy sensor."""
+class TuyaSelfCheckResult(t.enum8):
+    """Tuya self check result enum."""
 
-    signature = {
-        #  endpoint=1 profile=260 device_type=81 device_version=0 input_clusters=[0, 4, 5, 61184]
-        #  output_clusters=[10, 25]>
-        MODELS_INFO: [
-            ("_TZE200_7hfcudw5", "TS0601"),
-            ("_TZE200_ppuj1vem", "TS0601"),
-        ],
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: zha.DeviceType.SMART_PLUG,
-                INPUT_CLUSTERS: [
-                    Basic.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    NeoMotionManufCluster.cluster_id,
-                ],
-                OUTPUT_CLUSTERS: [Time.cluster_id, Ota.cluster_id],
-            }
-        },
-    }
-
-    replacement = {
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: zha.DeviceType.OCCUPANCY_SENSOR,
-                INPUT_CLUSTERS: [
-                    Basic.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    NeoMotionManufCluster,
-                    TuyaOccupancySensing,
-                    TuyaTemperatureMeasurement,
-                    TuyaRelativeHumidity,
-                ],
-                OUTPUT_CLUSTERS: [Time.cluster_id, Ota.cluster_id],
-            }
-        }
-    }
+    Checking = 0x00
+    CheckSuccess = 0x01
+    CheckFailure = 0x02
+    Others = 0x03
+    CommFault = 0x04
+    RadarFault = 0x05
 
 
-class MmwRadarMotion(CustomDevice):
-    """Millimeter wave occupancy sensor."""
+class TuyaBreakerMode(t.enum8):
+    """Tuya breaker mode enum."""
 
-    signature = {
-        #  endpoint=1, profile=260, device_type=81, device_version=1,
-        #  input_clusters=[0, 4, 5, 61184], output_clusters=[25, 10]
-        MODELS_INFO: [
-            ("_TZE200_ar0slwnd", "TS0601"),
-            ("_TZE200_sfiy5tfs", "TS0601"),
-            ("_TZE200_mrf6vtua", "TS0601"),
-            ("_TZE200_ztc6ggyl", "TS0601"),
-            ("_TZE204_ztc6ggyl", "TS0601"),
-            ("_TZE200_wukb7rhc", "TS0601"),
-        ],
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: zha.DeviceType.SMART_PLUG,
-                INPUT_CLUSTERS: [
-                    Basic.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    TuyaNewManufCluster.cluster_id,
-                ],
-                OUTPUT_CLUSTERS: [Time.cluster_id, Ota.cluster_id],
-            },
-        },
-    }
-
-    replacement = {
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: zha.DeviceType.OCCUPANCY_SENSOR,
-                INPUT_CLUSTERS: [
-                    Basic.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    MmwRadarManufCluster,
-                    TuyaOccupancySensing,
-                    TuyaAnalogInput,
-                    TuyaIlluminanceMeasurement,
-                ],
-                OUTPUT_CLUSTERS: [Time.cluster_id, Ota.cluster_id],
-            },
-        }
-    }
+    Standard = 0x00
+    Local = 0x01
 
 
-class MmwRadarMotionGPP(CustomDevice):
-    """Millimeter wave occupancy sensor."""
+class TuyaBreakerStatus(t.enum8):
+    """Tuya breaker status enum."""
 
-    signature = {
-        #  endpoint=1, profile=260, device_type=81, device_version=1,
-        #  input_clusters=[4, 5, 61184, 0], output_clusters=[25, 10])
-        MODELS_INFO: [
-            ("_TZE200_ar0slwnd", "TS0601"),
-            ("_TZE200_sfiy5tfs", "TS0601"),
-            ("_TZE200_mrf6vtua", "TS0601"),
-            ("_TZE204_qasjif9e", "TS0601"),
-            ("_TZE204_ztqnh5cg", "TS0601"),
-        ],
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: zha.DeviceType.SMART_PLUG,
-                INPUT_CLUSTERS: [
-                    Basic.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    TuyaNewManufCluster.cluster_id,
-                ],
-                OUTPUT_CLUSTERS: [Time.cluster_id, Ota.cluster_id],
-            },
-            242: {
-                # <SimpleDescriptor endpoint=242 profile=41440 device_type=97
-                # input_clusters=[]
-                # output_clusters=[33]
-                PROFILE_ID: zgp.PROFILE_ID,
-                DEVICE_TYPE: zgp.DeviceType.PROXY_BASIC,
-                INPUT_CLUSTERS: [],
-                OUTPUT_CLUSTERS: [GreenPowerProxy.cluster_id],
-            },
-        },
-    }
+    Off = 0x00
+    On = 0x01
 
-    replacement = {
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: zha.DeviceType.OCCUPANCY_SENSOR,
-                INPUT_CLUSTERS: [
-                    Basic.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    MmwRadarManufCluster,
-                    TuyaOccupancySensing,
-                    TuyaAnalogInput,
-                    TuyaIlluminanceMeasurement,
-                ],
-                OUTPUT_CLUSTERS: [Time.cluster_id, Ota.cluster_id],
-            },
-            242: {
-                PROFILE_ID: zgp.PROFILE_ID,
-                DEVICE_TYPE: zgp.DeviceType.PROXY_BASIC,
-                INPUT_CLUSTERS: [],
-                OUTPUT_CLUSTERS: [GreenPowerProxy.cluster_id],
-            },
-        }
-    }
+
+class TuyaStatusIndication(t.enum8):
+    """Tuya status indication enum."""
+
+    Off = 0x00
+    On = 0x01
+
+
+class TuyaBreakerPolarity(t.enum8):
+    """Tuya breaker polarity enum."""
+
+    NC = 0x00
+    NO = 0x01
+
+
+class TuyaMotionSensorMode(t.enum8):
+    """Tuya motion sensor mode enum."""
+
+    On = 0x00
+    Off = 0x01
+    Occupied = 0x02
+    Unoccupied = 0x03
+
+
+class TuyaHumanMotionState(t.enum8):
+    """Tuya human motion state enum."""
+
+    Off = 0x00
+    Small = 0x01
+    Large = 0x02
+
+
+base_tuya_motion = (
+    TuyaQuirkBuilder()
+    .adds(TuyaOccupancySensing)
+    .tuya_number(
+        dp_id=2,
+        attribute_name="move_sensitivity",
+        type=t.uint16_t,
+        min_value=0,
+        max_value=10,
+        step=1,
+        translation_key="move_sensitivity",
+        fallback_name="Motion sensitivity",
+    )
+    .tuya_number(
+        dp_id=3,
+        attribute_name="detection_distance_min",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DISTANCE,
+        unit=UnitOfLength.METERS,
+        min_value=0,
+        max_value=8.25,
+        step=0.75,
+        multiplier=0.01,
+        translation_key="detection_distance_min",
+        fallback_name="Minimum range",
+    )
+    .tuya_number(
+        dp_id=4,
+        attribute_name="detection_distance_max",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DISTANCE,
+        unit=UnitOfLength.METERS,
+        min_value=0.75,
+        max_value=9.0,
+        step=0.75,
+        multiplier=0.01,
+        translation_key="detection_distance_max",
+        fallback_name="Maximum range",
+    )
+    .tuya_sensor(
+        dp_id=9,
+        attribute_name="distance",
+        type=t.uint16_t,
+        divisor=100,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.DISTANCE,
+        unit=UnitOfLength.METERS,
+        entity_type=EntityType.STANDARD,
+        translation_key="distance",
+        fallback_name="Target distance",
+    )
+    .adds(TuyaIlluminanceCluster)
+    .skip_configuration()
+)
+
+(
+    base_tuya_motion.clone()
+    .applies_to("_TZE200_ya4ft0w4", "TS0601")
+    .applies_to("_TZE204_ya4ft0w4", "TS0601")
+    .tuya_dp(
+        dp_id=1,
+        ep_attribute=TuyaOccupancySensing.ep_attribute,
+        attribute_name=OccupancySensing.AttributeDefs.occupancy.name,
+        converter=lambda x: True if x in (1, 2) else False,
+    )
+    # 2, 3, 4, and 9 from base
+    .tuya_switch(
+        dp_id=101,
+        attribute_name="find_switch",
+        entity_type=EntityType.STANDARD,
+        translation_key="led_indicator",
+        fallback_name="LED indicator",
+    )
+    .tuya_number(
+        dp_id=102,
+        attribute_name="presence_sensitivity",
+        type=t.uint16_t,
+        min_value=0,
+        max_value=10,
+        step=1,
+        multiplier=0.1,
+        translation_key="presence_sensitivity",
+        fallback_name="Presence sensitivity",
+    )
+    .tuya_dp(
+        dp_id=103,
+        ep_attribute=TuyaIlluminanceCluster.ep_attribute,
+        attribute_name=TuyaIlluminanceCluster.AttributeDefs.measured_value.name,
+        converter=lambda x: 10000 * math.log10(x) + 1 if x != 0 else 0,
+    )
+    .tuya_number(
+        dp_id=105,
+        attribute_name="presence_timeout",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DURATION,
+        unit=UnitOfTime.SECONDS,
+        min_value=1,
+        max_value=15000,
+        step=1,
+        translation_key="presence_timeout",
+        fallback_name="Fade time",
+    )
+    .add_to_registry()
+)
+
+(
+    base_tuya_motion.clone()
+    .applies_to("_TZE200_ar0slwnd", "TS0601")  # Not present in z2m
+    .applies_to("_TZE200_mrf6vtua", "TS0601")  # Not present in z2m
+    .applies_to("_TZE200_sfiy5tfs", "TS0601")  # Not present in z2m
+    .applies_to("_TZE204_sooucan5", "TS0601")  # Not present in z2m
+    .applies_to("_TZE200_wukb7rhc", "TS0601")  # Listed in z2m
+    .applies_to("_TZE200_ztc6ggyl", "TS0601")  # Listed in z2m
+    .applies_to("_TZE204_ztc6ggyl", "TS0601")  # Listed in z2m
+    .applies_to("_TZE200_ikvncluo", "TS0601")  # Added from z2m, not present prior
+    .applies_to("_TZE200_lyetpprm", "TS0601")  # Added from z2m, not present prior
+    .applies_to("_TZE200_jva8ink8", "TS0601")  # Added from z2m, not present prior
+    .applies_to("_TZE204_xpq2rzhq", "TS0601")  # Added from z2m, not present prior
+    .applies_to("_TZE200_holel4dk", "TS0601")  # Added from z2m, not present prior
+    .applies_to("_TZE200_xpq2rzhq", "TS0601")  # Added from z2m, not present prior
+    .applies_to("_TZE204_xsm7l9xa", "TS0601")  # Added from z2m, not present prior
+    .applies_to("_TZE200_sgpeacqp", "TS0601")  # Added from z2m, not present prior
+    .applies_to("_TZE204_fwondbzy", "TS0601")  # Added from z2m, not present prior
+    .tuya_dp(
+        dp_id=1,
+        ep_attribute=TuyaOccupancySensing.ep_attribute,
+        attribute_name=OccupancySensing.AttributeDefs.occupancy.name,
+        converter=lambda x: x == 1,
+    )
+    # 2, 3, 4, and 9 from base
+    .tuya_enum(
+        dp_id=6,  # z2m lists as not working, yet exposes
+        attribute_name="self_test",
+        enum_class=TuyaSelfCheckResult,
+        entity_platform=EntityPlatform.SENSOR,
+        entity_type=EntityType.DIAGNOSTIC,
+        translation_key="self_test",
+        fallback_name="Self test result",
+    )
+    .tuya_switch(
+        dp_id=101,
+        attribute_name="find_switch",
+        entity_type=EntityType.STANDARD,
+        translation_key="led_indicator",
+        fallback_name="LED indicator",
+    )
+    .tuya_number(
+        dp_id=102,
+        attribute_name="presence_sensitivity",
+        type=t.uint16_t,
+        min_value=0,
+        max_value=10,
+        step=1,
+        multiplier=0.1,
+        translation_key="presence_sensitivity",
+        fallback_name="Presence sensitivity",
+    )
+    .tuya_dp(
+        dp_id=104,
+        ep_attribute=TuyaIlluminanceCluster.ep_attribute,
+        attribute_name=TuyaIlluminanceCluster.AttributeDefs.measured_value.name,
+        converter=lambda x: 10000 * math.log10(x) + 1 if x != 0 else 0,
+    )
+    # 103 cli, z2m lists as not working
+    .add_to_registry()
+)
+
+(
+    base_tuya_motion.clone()
+    .applies_to("_TZE204_qasjif9e", "TS0601")
+    .applies_to("_TZE204_ztqnh5cg", "TS0601")
+    .tuya_dp(
+        dp_id=1,
+        ep_attribute=TuyaOccupancySensing.ep_attribute,
+        attribute_name=OccupancySensing.AttributeDefs.occupancy.name,
+        converter=lambda x: x == 1,
+    )
+    # 2, 3, 4, and 9 from base
+    .tuya_number(
+        dp_id=101,
+        attribute_name="detection_delay",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DURATION,
+        unit=UnitOfTime.SECONDS,
+        min_value=1,
+        max_value=10,
+        step=0.1,
+        multiplier=0.1,
+        translation_key="detection_delay",
+        fallback_name="Detection delay",
+    )
+    .tuya_number(
+        dp_id=102,
+        attribute_name="fading_time",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DURATION,
+        unit=UnitOfTime.SECONDS,
+        min_value=1,
+        max_value=1500,
+        step=0.1,
+        multiplier=0.1,
+        translation_key="fading_time",
+        fallback_name="Fading time",
+    )
+    .tuya_dp(
+        dp_id=104,
+        ep_attribute=TuyaIlluminanceCluster.ep_attribute,
+        attribute_name=TuyaIlluminanceCluster.AttributeDefs.measured_value.name,
+        converter=lambda x: 10000 * math.log10(x) + 1 if x != 0 else 0,
+    )
+    .add_to_registry()
+)
+
+(
+    TuyaQuirkBuilder("_TYST11_i5j6ifxj", "5j6ifxj")
+    .applies_to("_TYST11_7hfcudw5", "hfcudw5")
+    .tuya_ias(
+        dp_id=3,
+        ias_cfg=TuyaMotionWithReset,
+        converter=lambda x: IasZone.ZoneStatus.Alarm_1 if x == 2 else 0,
+    )
+    .skip_configuration()
+    .add_to_registry()
+)
+
+# Neo motion, NAS-PD07 occupancy sensor
+(
+    TuyaQuirkBuilder("_TZE200_7hfcudw5", "TS0601")
+    .applies_to("_TZE200_ppuj1vem", "TS0601")
+    .tuya_dp(
+        dp_id=101,
+        ep_attribute=TuyaOccupancySensing.ep_attribute,
+        attribute_name=OccupancySensing.AttributeDefs.occupancy.name,
+        converter=lambda x: x == 1,
+    )
+    .adds(TuyaOccupancySensing)
+    .tuya_temperature(dp_id=104, scale=10)
+    .tuya_humidity(dp_id=105)
+    .skip_configuration()
+    .add_to_registry()
+)
+
+(
+    base_tuya_motion.clone()
+    .applies_to("_TZE204_sbyx0lm6", "TS0601")
+    .applies_to("_TZE204_clrdrnya", "TS0601")
+    .applies_to("_TZE204_dtzziy1e", "TS0601")
+    .applies_to("_TZE204_iaeejhvf", "TS0601")
+    .applies_to("_TZE204_mtoaryre", "TS0601")
+    .applies_to("_TZE200_mp902om5", "TS0601")
+    .applies_to("_TZE204_pfayrzcw", "TS0601")
+    .applies_to("_TZE284_4qznlkbu", "TS0601")
+    .applies_to("_TZE200_sbyx0lm6", "TS0601")
+    .tuya_dp(
+        dp_id=1,
+        ep_attribute=TuyaOccupancySensing.ep_attribute,
+        attribute_name=OccupancySensing.AttributeDefs.occupancy.name,
+        converter=lambda x: x == 1,
+    )
+    # 2, 3, 4, and 9 from base, z2m has slightly different values limits and names
+    # 6 is equipment_status, z2m doesn't expose
+    .tuya_number(
+        dp_id=101,
+        attribute_name="detection_delay",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DURATION,
+        unit=UnitOfTime.SECONDS,
+        min_value=1,
+        max_value=10,
+        step=0.1,
+        multiplier=0.1,
+        translation_key="detection_delay",
+        fallback_name="Detection delay",
+    )
+    .tuya_number(
+        dp_id=102,
+        attribute_name="fading_time",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DURATION,
+        unit=UnitOfTime.SECONDS,
+        min_value=0,
+        max_value=600,
+        step=1,
+        translation_key="fading_time",
+        fallback_name="Fading time",
+    )
+    # 103 cline, z2m doesn't expose
+    .tuya_dp(
+        dp_id=104,
+        ep_attribute=TuyaIlluminanceCluster.ep_attribute,
+        attribute_name=TuyaIlluminanceCluster.AttributeDefs.measured_value.name,
+        converter=lambda x: 10000 * math.log10(x) + 1 if x != 0 else 0,
+    )
+    .tuya_number(
+        dp_id=105,
+        attribute_name="entry_sensitivity",
+        type=t.uint16_t,
+        min_value=0,
+        max_value=9,
+        step=1,
+        translation_key="entry_sensitivity",
+        fallback_name="Entry sensitivity",
+    )
+    .tuya_number(
+        dp_id=106,
+        attribute_name="entry_distance_indentation",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DISTANCE,
+        unit=UnitOfLength.METERS,
+        min_value=0,
+        max_value=9,
+        step=0.1,
+        multiplier=0.01,
+        translation_key="entry_distance_indentation",
+        fallback_name="Entry distance indentation",
+    )
+    .tuya_enum(
+        dp_id=107,
+        attribute_name="breaker_mode",
+        enum_class=TuyaBreakerMode,
+        translation_key="breaker_mode",
+        fallback_name="Breaker mode",
+    )
+    .tuya_enum(
+        dp_id=108,
+        attribute_name="breaker_status",
+        enum_class=TuyaBreakerStatus,
+        translation_key="breaker_status",
+        fallback_name="Breaker status",
+    )
+    .tuya_enum(
+        dp_id=109,
+        attribute_name="status_indication",
+        enum_class=TuyaStatusIndication,
+        translation_key="status_indication",
+        fallback_name="Status indication",
+    )
+    .tuya_number(
+        dp_id=110,
+        attribute_name="illuminance_threshold",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.ILLUMINANCE,
+        # unit=LIGHT_LUX, # Not supported ZHA yet
+        min_value=0,
+        max_value=420,
+        step=0.1,
+        multiplier=0.1,
+        translation_key="illuminance_threshold",
+        fallback_name="Illuminance threshold",
+    )
+    .tuya_enum(
+        dp_id=111,
+        attribute_name="breaker_polarity",
+        enum_class=TuyaBreakerPolarity,
+        translation_key="breaker_polarity",
+        fallback_name="Breaker polarity",
+    )
+    .tuya_number(
+        dp_id=112,
+        attribute_name="block_time",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DURATION,
+        unit=UnitOfTime.SECONDS,
+        min_value=0,
+        max_value=10,
+        step=0.1,
+        multiplier=0.1,
+        translation_key="block_time",
+        fallback_name="Block time",
+    )
+    # 113 parameter_setting_result, z2m doesn't expose
+    # 114 factory_parameters, z2m doesn't expose
+    .tuya_enum(
+        dp_id=115,
+        attribute_name="sensor_mode",
+        enum_class=TuyaMotionSensorMode,
+        translation_key="sensor_mode",
+        fallback_name="Sensor mode",
+    )
+    .add_to_registry()
+)
+
+(
+    TuyaQuirkBuilder("_TZE204_muvkrjr5", "TS0601")
+    .tuya_dp(
+        dp_id=1,
+        ep_attribute=TuyaOccupancySensing.ep_attribute,
+        attribute_name=OccupancySensing.AttributeDefs.occupancy.name,
+        converter=lambda x: x == 1,
+    )
+    .adds(TuyaOccupancySensing)
+    .tuya_number(
+        dp_id=13,
+        attribute_name="detection_distance_max",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DISTANCE,
+        unit=UnitOfLength.METERS,
+        min_value=1.5,
+        max_value=6.0,
+        step=0.75,
+        multiplier=0.01,
+        translation_key="detection_distance_max",
+        fallback_name="Maximum range",
+    )
+    .tuya_number(
+        dp_id=16,
+        attribute_name="motion_sensitivity",
+        type=t.uint16_t,
+        min_value=68,
+        max_value=90,
+        step=1,
+        translation_key="motion_sensitivity",
+        fallback_name="Motion sensitivity",
+    )
+    .tuya_sensor(
+        dp_id=19,
+        attribute_name="target_distance",
+        type=t.uint16_t,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.DISTANCE,
+        unit=UnitOfLength.CENTIMETERS,
+        entity_type=EntityType.STANDARD,
+        translation_key="target_distance",
+        fallback_name="Target distance",
+    )
+    .tuya_binary_sensor(
+        dp_id=101,
+        attribute_name="find_switch",
+        entity_type=EntityType.STANDARD,
+        translation_key="led_indicator",
+        fallback_name="LED indicator",
+    )
+    # 102 is ignored, per z2m
+    .tuya_number(
+        dp_id=103,
+        attribute_name="fading_time",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DURATION,
+        unit=UnitOfTime.SECONDS,
+        min_value=3,
+        max_value=1799,
+        step=1,
+        translation_key="fading_time",
+        fallback_name="Fading time",
+    )
+    .skip_configuration()
+    .add_to_registry()
+)
+
+
+(
+    TuyaQuirkBuilder("_TZE204_kyhbrfyl", "TS0601")
+    .tuya_dp(
+        dp_id=1,
+        ep_attribute=TuyaOccupancySensing.ep_attribute,
+        attribute_name=OccupancySensing.AttributeDefs.occupancy.name,
+        converter=lambda x: x == 1,
+    )
+    .adds(TuyaOccupancySensing)
+    .tuya_enum(
+        dp_id=11,
+        attribute_name="human_motion_state",
+        enum_class=TuyaHumanMotionState,
+        entity_platform=EntityPlatform.SENSOR,
+        entity_type=EntityType.STANDARD,
+        translation_key="human_motion_state",
+        fallback_name="Human motion state",
+    )
+    .tuya_number(
+        dp_id=12,
+        attribute_name="fading_time",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DURATION,
+        unit=UnitOfTime.SECONDS,
+        min_value=3,
+        max_value=600,
+        step=1,
+        translation_key="fading_time",
+        fallback_name="Fading time",
+    )
+    .tuya_number(
+        dp_id=13,
+        attribute_name="detection_distance_max",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DISTANCE,
+        unit=UnitOfLength.CENTIMETERS,
+        min_value=150,
+        max_value=600,
+        step=1,
+        translation_key="detection_distance_max",
+        fallback_name="Maximum range",
+    )
+    .tuya_number(
+        dp_id=15,
+        attribute_name="radar_sensitivity",
+        type=t.uint16_t,
+        min_value=0,
+        max_value=7,
+        step=1,
+        translation_key="radar_sensitivity",
+        fallback_name="Radar sensitivity",
+    )
+    .tuya_number(
+        dp_id=16,
+        attribute_name="presence_sensitivity",
+        type=t.uint16_t,
+        min_value=0,
+        max_value=7,
+        step=1,
+        translation_key="presence_sensitivity",
+        fallback_name="Presence sensitivity",
+    )
+    .tuya_sensor(
+        dp_id=19,
+        attribute_name="target_distance",
+        type=t.uint16_t,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.DISTANCE,
+        unit=UnitOfLength.CENTIMETERS,
+        entity_type=EntityType.STANDARD,
+        translation_key="target_distance",
+        fallback_name="Target distance",
+    )
+    .skip_configuration()
+    .add_to_registry()
+)
+
+# Heimen HS80S-TY
+(
+    TuyaQuirkBuilder("_TZ6210_duv6fhwt", "TS0601")
+    .tuya_dp(
+        dp_id=1,
+        ep_attribute=TuyaOccupancySensing.ep_attribute,
+        attribute_name=OccupancySensing.AttributeDefs.occupancy.name,
+        converter=lambda x: x == 1,
+    )
+    .tuya_dp(
+        dp_id=101,
+        ep_attribute=TuyaIlluminanceCluster.ep_attribute,
+        attribute_name=TuyaIlluminanceCluster.AttributeDefs.measured_value.name,
+        converter=lambda x: 10000 * math.log10(x) + 1 if x != 0 else 0,
+    )
+    .adds(TuyaOccupancySensing)
+    .tuya_switch(
+        dp_id=102,
+        attribute_name="find_switch",
+        entity_type=EntityType.STANDARD,
+        translation_key="led_indicator",
+        fallback_name="LED indicator",
+    )
+    .tuya_binary_sensor(
+        dp_id=103,
+        attribute_name="tamper",
+        device_class=BinarySensorDeviceClass.TAMPER,
+        entity_type=EntityType.DIAGNOSTIC,
+        translation_key="tamper",
+        fallback_name="Tamper",
+    )
+    .tuya_number(
+        dp_id=104,
+        attribute_name="motionless_detection",
+        type=t.uint16_t,
+        min_value=0,
+        max_value=100,
+        step=1,
+        translation_key="motionless_detection",
+        fallback_name="Motionless detection",
+    )
+    .tuya_number(
+        dp_id=105,
+        attribute_name="presence_timeout",
+        type=t.uint16_t,
+        device_class=SensorDeviceClass.DURATION,
+        unit=UnitOfTime.MINUTES,
+        min_value=1,
+        max_value=30,
+        step=1,
+        translation_key="presence_timeout",
+        fallback_name="Fade time",
+    )
+    .adds(TuyaIlluminanceCluster)
+    .skip_configuration()
+    .add_to_registry()
+)
