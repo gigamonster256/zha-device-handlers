@@ -1786,6 +1786,7 @@ def test_custom_z03mmc_signature_match(assert_signature_matches_quirk):
         zhaquirks.xiaomi.custom.z03mmc.LYWSD03MMC_devbis, signature
     )
 
+
 @pytest.mark.parametrize(
     "occupancy_value, expected_occ_status, motion_value, expected_motion_status",
     [
